@@ -8,7 +8,7 @@ d5 = cargar("data/mnq_5m.csv", 5); d1 = cargar("data/mnq_1m.csv", 1); s1 = agrup
 corte = pd.Timestamp("2026-09-24", tz="America/Bogota")
 # Horas en Bogotá: con horario de verano en EE. UU., 8:35-10:30 COT = 9:35-11:30 Nueva York.
 nuevo = Config(inicio=time(8, 35), fin=time(10, 30), filtro_vwap=True, stop_ticks=120, profit_ticks=60,
-               max_ops_dia=3, limite_dia_usd=120, limite_ganancia_usd=0)
+               max_ops_dia=3, limite_dia_usd=120, limite_ganancia_usd=0, max_atr_vs_stop=2.0)
 filas = []
 for nombre, cfg in [("Original", Config()), ("Nuevo (defaults del .cs)", nuevo)]:
     for datos, fn in [("ago12-oct22, velas 5m, relleno conservador", lambda c: simular(d5, c.__class__(**{**c.__dict__, "modo_relleno": "conservador"}))),

@@ -42,7 +42,10 @@ class Config:
     stop_atr: float = 1.0
     profit_atr: float = 1.0
     min_ticks: int = 8                  # piso de stop/objetivo cuando se usa ATR
+    max_atr_vs_stop: float = 0.0        # >0: no entrar si ATR(atr_periodo o 14) en ticks > X * stop
     modo_relleno: str = "ninja"         # "ninja" | "conservador"
+    prob_aleatoria: float = 0.0         # >0: reemplaza el cruce por una entrada al azar con esta probabilidad por vela
+    semilla: int = 0
 
 
 def cargar(ruta: str, minutos: int) -> pd.DataFrame:
@@ -85,6 +88,8 @@ def _senales(sig: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     out = pd.DataFrame(index=sig.index)
     out["t_cierre"] = sig["t_cierre"]
     out["arriba"] = (e1.shift(1) <= e2.shift(1)) & (e1 > e2)
+    if cfg.prob_aleatoria > 0:
+        out["arriba"] = np.random.default_rng(cfg.semilla).random(len(sig)) < cfg.prob_aleatoria
     out["abajo"] = (e1.shift(1) >= e2.shift(1)) & (e1 < e2)
     ok_l = pd.Series(True, index=sig.index)
     ok_c = pd.Series(True, index=sig.index)
@@ -100,6 +105,12 @@ def _senales(sig: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         d = e2.diff()
         ok_l &= d > 0
         ok_c &= d < 0
+    if cfg.max_atr_vs_stop > 0:
+        a = _atr(sig, cfg.atr_periodo or 14) / TICK
+        stop_t = (np.maximum(cfg.stop_atr * a * TICK, cfg.min_ticks * TICK) / TICK) if cfg.atr_periodo else cfg.stop_ticks
+        tranquilo = a <= cfg.max_atr_vs_stop * stop_t
+        ok_l &= tranquilo
+        ok_c &= tranquilo
     out["ok_l"], out["ok_c"] = ok_l, ok_c
     if cfg.atr_periodo:
         a = _atr(sig, cfg.atr_periodo)
@@ -149,11 +160,15 @@ def simular(sig: pd.DataFrame, cfg: Config, fino: pd.DataFrame | None = None) ->
         if pendiente is not None and abierta is None:
             lado, sd, od = pendiente
             px = o[i] + slip * lado
-            abierta = dict(entrada_t=tc[i], lado=lado, precio_entrada=px, stop=px - sd * lado, objetivo=px + od * lado)
+            abierta = dict(entrada_t=tc[i], lado=lado, precio_entrada=px, stop=px - sd * lado, objetivo=px + od * lado, mae_ticks=0.0, mfe_ticks=0.0)
         pendiente = None
 
         if abierta is not None:
             op, lado = abierta, abierta["lado"]
+            fav = (min(h[i], op["objetivo"]) - op["precio_entrada"]) if lado == 1 else (op["precio_entrada"] - max(l[i], op["objetivo"]))
+            contra = (op["precio_entrada"] - max(l[i], op["stop"])) if lado == 1 else (min(h[i], op["stop"]) - op["precio_entrada"])
+            op["mfe_ticks"] = max(op["mfe_ticks"], fav / TICK)
+            op["mae_ticks"] = max(op["mae_ticks"], contra / TICK)
             if lado == 1:
                 toca_stop, toca_obj = l[i] <= op["stop"], h[i] >= op["objetivo"] + TICK
             else:
