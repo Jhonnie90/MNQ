@@ -1,0 +1,14 @@
+# Calendario de noticias para el filtro de la estrategia (parámetro MinutosNoticias).
+# Para activarlo: copiar este archivo a Documentos\NinjaTrader 8\ con el nombre MNQAutomaticoPrueba_noticias.csv
+# Formato: fecha (yyyy-MM-dd), hora de NUEVA YORK (HH:mm) y descripción. Sin hora = todo el día sin operar.
+# El backtest y el vivo leen el mismo archivo, así que se puede medir el efecto antes de usarlo.
+# Las fechas de abajo son un ejemplo y HAY QUE VERIFICARLAS en los calendarios oficiales (ismworld.org, bls.gov,
+# conference-board.org, federalreserve.gov). Los datos de las 8:30 (IPC, empleo) salen antes de la ventana de 9:35.
+2026-11-02,10:00,ISM manufacturero (verificar)
+2026-11-04,10:00,ISM servicios (verificar)
+2026-11-26,,Thanksgiving - mercado cerrado
+2026-11-27,,Día después de Thanksgiving - cierre temprano
+2026-12-01,10:00,ISM manufacturero (verificar)
+2026-12-03,10:00,ISM servicios (verificar)
+2026-12-24,,Nochebuena - cierre temprano
+2026-12-31,,Fin de año
