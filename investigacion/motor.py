@@ -46,6 +46,15 @@ class Config:
     modo_relleno: str = "ninja"         # "ninja" | "conservador"
     prob_aleatoria: float = 0.0         # >0: reemplaza el cruce por una entrada al azar con esta probabilidad por vela
     semilla: int = 0
+    # --- salidas y filtros de la investigación (apagados por defecto) ---
+    salida_tiempo_velas: int = 0        # >0: salir a mercado tras N velas del gráfico sin tocar objetivo
+    salida_tiempo_min_ticks: int | None = None  # None = salir siempre; X = salir solo si no va X ticks a favor (como el .cs)
+    breakeven_ticks: int = 0            # >0: al cierre de vela, si fue X ticks a favor, stop a entrada + breakeven_mas_ticks
+    breakeven_mas_ticks: int = 2
+    filtro_primera_vela: bool = False   # largos solo si la vela de 9:30-9:35 NY cerró alcista
+    filtro_gap: bool = False            # largos solo si la apertura de 9:30 NY abrió sobre el cierre de 16:00 anterior
+    filtro_sobre_apertura: bool = False # largos solo si el precio está sobre la apertura de 9:30 NY
+    filtro_sobre_cierre_anterior: bool = False  # largos solo si el precio está sobre el cierre de 16:00 anterior
 
 
 def cargar(ruta: str, minutos: int) -> pd.DataFrame:
@@ -111,6 +120,28 @@ def _senales(sig: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         tranquilo = a <= cfg.max_atr_vs_stop * stop_t
         ok_l &= tranquilo
         ok_c &= tranquilo
+    if cfg.filtro_primera_vela or cfg.filtro_gap or cfg.filtro_sobre_apertura or cfg.filtro_sobre_cierre_anterior:
+        ny_ini = sig.index.tz_convert("America/New_York")
+        ny_fin = sig["t_cierre"].dt.tz_convert("America/New_York")
+        fecha = pd.Series(ny_ini.date, index=sig.index)
+        hm = pd.Series(ny_ini.hour * 100 + ny_ini.minute, index=sig.index)
+        hm_fin = ny_fin.dt.hour * 100 + ny_fin.dt.minute
+        apertura = sig["Open"].where(hm == 930).groupby(fecha).transform("max")
+        if cfg.filtro_primera_vela:
+            alcista = (sig["Close"] > sig["Open"]).astype(float).where(hm == 930).groupby(fecha).transform("max")
+            ok_l &= alcista == 1
+            ok_c &= alcista == 0
+        cierre = sig["Close"].where(hm_fin == 1600).groupby(fecha).max().dropna()
+        previo = fecha.map(cierre.reindex(sorted(set(fecha))).ffill().shift(1))
+        if cfg.filtro_sobre_cierre_anterior:
+            ok_l &= sig["Close"] > previo
+            ok_c &= sig["Close"] < previo
+        if cfg.filtro_gap:
+            ok_l &= apertura > previo
+            ok_c &= apertura < previo
+        if cfg.filtro_sobre_apertura:
+            ok_l &= sig["Close"] > apertura
+            ok_c &= sig["Close"] < apertura
     out["ok_l"], out["ok_c"] = ok_l, ok_c
     if cfg.atr_periodo:
         a = _atr(sig, cfg.atr_periodo)
@@ -132,7 +163,7 @@ def simular(sig: pd.DataFrame, cfg: Config, fino: pd.DataFrame | None = None) ->
     f = fino[["Open", "High", "Low", "Close", "t_cierre"]].copy()
     f = f.join(ev, on="t_cierre", how="left")
     es_cierre = f["n"].notna().to_numpy()
-    o, h, l = (f[k].to_numpy() for k in ("Open", "High", "Low"))
+    o, h, l, c = (f[k].to_numpy() for k in ("Open", "High", "Low", "Close"))
     tc = f["t_cierre"].to_numpy()
     horas = f["t_cierre"].dt.time.to_numpy()
     fechas = f["t_cierre"].dt.date.to_numpy()
@@ -141,7 +172,7 @@ def simular(sig: pd.DataFrame, cfg: Config, fino: pd.DataFrame | None = None) ->
     sd_v, od_v, n_v = f["sd"].to_numpy(), f["od"].to_numpy(), f["n"].to_numpy()
     slip = cfg.slippage_ticks * TICK
 
-    ops, abierta, pendiente, salida_pendiente = [], None, None, False
+    ops, abierta, pendiente, salida_pendiente, motivo_salida = [], None, None, False, "CierreHorario"
     fecha_cont, ops_hoy, pnl_ini, bloqueo, pnl_acum = None, 0, 0.0, False, 0.0
     ambiguas = 0
 
@@ -154,13 +185,13 @@ def simular(sig: pd.DataFrame, cfg: Config, fino: pd.DataFrame | None = None) ->
 
     for i in range(len(f)):
         if salida_pendiente and abierta is not None:
-            cerrar(abierta, i, o[i] - slip * abierta["lado"], "CierreHorario")
+            cerrar(abierta, i, o[i] - slip * abierta["lado"], motivo_salida)
             abierta = None
         salida_pendiente = False
         if pendiente is not None and abierta is None:
             lado, sd, od = pendiente
             px = o[i] + slip * lado
-            abierta = dict(entrada_t=tc[i], lado=lado, precio_entrada=px, stop=px - sd * lado, objetivo=px + od * lado, mae_ticks=0.0, mfe_ticks=0.0)
+            abierta = dict(entrada_t=tc[i], lado=lado, precio_entrada=px, stop=px - sd * lado, objetivo=px + od * lado, mae_ticks=0.0, mfe_ticks=0.0, velas=0)
         pendiente = None
 
         if abierta is not None:
@@ -201,8 +232,18 @@ def simular(sig: pd.DataFrame, cfg: Config, fino: pd.DataFrame | None = None) ->
         if n_v[i] < 50:
             continue
         if abierta is not None and horas[i] >= cfg.fin:
-            salida_pendiente = True
+            salida_pendiente, motivo_salida = True, "CierreHorario"
             continue
+        if abierta is not None:
+            op = abierta
+            op["velas"] += 1
+            if cfg.salida_tiempo_velas and op["velas"] >= cfg.salida_tiempo_velas and (
+                    cfg.salida_tiempo_min_ticks is None or (c[i] - op["precio_entrada"]) * op["lado"] / TICK < cfg.salida_tiempo_min_ticks):
+                salida_pendiente, motivo_salida = True, "SalidaTiempo"
+                continue
+            if cfg.breakeven_ticks and op["mfe_ticks"] >= cfg.breakeven_ticks:
+                be = op["precio_entrada"] + cfg.breakeven_mas_ticks * TICK * op["lado"]
+                op["stop"] = max(op["stop"], be) if op["lado"] == 1 else min(op["stop"], be)
         if abierta is None and cfg.inicio <= horas[i] < cfg.fin and not bloqueo and ops_hoy < cfg.max_ops_dia:
             lado = 0
             if cfg.largos and arriba[i] and ok_l[i]:
